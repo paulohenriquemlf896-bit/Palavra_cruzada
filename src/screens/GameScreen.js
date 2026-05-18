@@ -10,8 +10,26 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import CrosswordGrid from '../components/CrosswordGrid';
 import { gerarCruzada } from '../utils/CrosswordGenerator';
+import { DIFICULDADES } from '../utils/dificuldades';
 
-const storageKey = (tema, tamanho) => `cruzada_${tema}_${tamanho}`;
+const storageKey         = (tema, tamanho) => `cruzada_${tema}_${tamanho}`;
+const storageKeyDicas    = (tema, tamanho) => `dicas_${tema}_${tamanho}`;
+// Guarda a data (YYYY-MM-DD) em que o jogador revelou uma palavra inteira.
+// Independente do tema/tamanho — só 1 palavra revelada por dia em qualquer jogo.
+const STORAGE_PALAVRA_DIA = '@cruzada_palavra_revelada_dia';
+
+// ── REGRAS DO SISTEMA DE DICAS ───────────────────────────────────────────────
+// • Revelar LETRA   → custa 1 dica
+// • Revelar PALAVRA → custa TODAS as dicas de uma vez + limitado a 1 vez por dia
+// DICAS_TOTAL vem de DIFICULDADES[dificuldade].dicas — muda por nível.
+const CUSTO_REVELAR_PALAVRA  = 'all'; // sinaliza "esgota todas"
+const CUSTO_REVELAR_LETRA    = 1;
+
+// Retorna a data de hoje no formato YYYY-MM-DD (fuso local)
+function hojeStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
 
 async function salvarProgresso(tema, tamanho, gridData, userAnswers) {
   try {
@@ -38,12 +56,49 @@ async function carregarProgresso(tema, tamanho) {
 async function apagarProgresso(tema, tamanho) {
   try {
     await AsyncStorage.removeItem(storageKey(tema, tamanho));
+    await AsyncStorage.removeItem(storageKeyDicas(tema, tamanho));
   } catch (err) {}
 }
 
+// Carrega quantas dicas o usuário já usou nesta partida
+async function carregarDicas(tema, tamanho) {
+  try {
+    const raw = await AsyncStorage.getItem(storageKeyDicas(tema, tamanho));
+    return raw ? parseInt(raw, 10) : 0;
+  } catch { return 0; }
+}
+
+// Salva o contador de dicas usadas
+async function salvarDicas(tema, tamanho, usado) {
+  try {
+    await AsyncStorage.setItem(storageKeyDicas(tema, tamanho), String(usado));
+  } catch {}
+}
+
+// Verifica se o jogador já revelou uma palavra inteira hoje
+async function jogadorJaRevelandoPalavraDia() {
+  try {
+    const salvo = await AsyncStorage.getItem(STORAGE_PALAVRA_DIA);
+    return salvo === hojeStr();
+  } catch { return false; }
+}
+
+// Marca que o jogador revelou uma palavra inteira hoje
+async function marcarPalavraReveladaHoje() {
+  try {
+    await AsyncStorage.setItem(STORAGE_PALAVRA_DIA, hojeStr());
+  } catch {}
+}
+
 export default function GameScreen({ config, onGoHome }) {
-  const tema    = config?.tema    ?? 'Tecnologia';
-  const tamanho = config?.tamanho ?? '10x10';
+  const tema        = config?.tema        ?? 'Tecnologia';
+  const tamanho     = config?.tamanho     ?? '10x10';
+  const dificuldade = config?.dificuldade ?? 'medio';
+
+  // DICAS_TOTAL vem diretamente da config de dificuldade.
+  // Dificuldade 'dificil' tem 0 dicas — os botões ficam todos desabilitados.
+  const DICAS_TOTAL = DIFICULDADES[dificuldade]?.dicas ?? 3;
+  const difConfig   = DIFICULDADES[dificuldade] ?? DIFICULDADES.medio;
 
   const [gridData,    setGridData]    = useState(null);
   const [userAnswers, setUserAnswers] = useState([]);
@@ -55,6 +110,14 @@ export default function GameScreen({ config, onGoHome }) {
   const [activeClue,        setActiveClue]        = useState(null);
 
   const [verificationResult, setVerificationResult] = useState(null);
+
+  // ── Estado de dicas ──────────────────────────────────────────────────────
+  // dicasUsadas: quantas dicas o jogador já consumiu nesta partida
+  // celulasReveladas: Set com chaves "row,col" das células reveladas pela dica
+  //   → usadas no CrosswordGrid para renderizar o ícone 💡 e bloquear edição
+  const [dicasUsadas,       setDicasUsadas]       = useState(0);
+  const [celulasReveladas,  setCelulasReveladas]   = useState(new Set());
+
   const saveTimer = useRef(null);
 
   useEffect(() => {
@@ -66,9 +129,15 @@ export default function GameScreen({ config, onGoHome }) {
           '♟ Jogo salvo encontrado',
           `Você tem um jogo de "${tema}" (${tamanho}) em andamento.\nDeseja continuar?`,
           [
-            { text: 'Continuar', onPress: () => {
+            { text: 'Continuar', onPress: async () => {
                 setGridData(salvo.gridData);
                 setUserAnswers(salvo.userAnswers);
+                // Restaura o contador de dicas e as células já reveladas
+                const dicasSalvas = await carregarDicas(tema, tamanho);
+                setDicasUsadas(dicasSalvas);
+                if (salvo.celulasReveladas) {
+                  setCelulasReveladas(new Set(salvo.celulasReveladas));
+                }
                 setGerando(false);
               }
             },
@@ -89,6 +158,8 @@ export default function GameScreen({ config, onGoHome }) {
     setActiveClue(null);
     setHighlightedWordId(null);
     setVerificationResult(null);
+    setDicasUsadas(0);
+    setCelulasReveladas(new Set());
 
     setTimeout(() => {
       try {
@@ -115,7 +186,11 @@ export default function GameScreen({ config, onGoHome }) {
     if (!gridData || !userAnswers.length) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      salvarProgresso(tema, tamanho, gridData, userAnswers);
+      salvarProgresso(tema, tamanho, {
+        ...gridData,
+        // Serializa o Set como array para JSON
+        celulasReveladas: [...celulasReveladas],
+      }, userAnswers);
     }, 800);
     return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
   }, [userAnswers]);
@@ -265,6 +340,158 @@ export default function GameScreen({ config, onGoHome }) {
     setVerificationResult(null);
   }, []);
 
+  // ── SISTEMA DE DICAS (Reveal) ─────────────────────────────────────────────
+  //
+  // LÓGICA:
+  //   handleRevealLetra → revela a letra da célula ativa (activeCell)
+  //   handleRevealPalavra → revela todas as letras da palavra selecionada
+  //
+  // Uma célula revelada:
+  //   1. Recebe a letra correta automaticamente em userAnswers
+  //   2. É adicionada ao Set `celulasReveladas`
+  //   3. Fica bloqueada para edição (o CrosswordGrid verifica o Set)
+  //   4. Aparece com ícone 💡 e cor dourada para distinguir do esforço próprio
+  //
+  // O contador `dicasUsadas` é persistido no AsyncStorage.
+  // Ao resetar/novo jogo, volta a zero.
+
+  const dicasRestantes = DICAS_TOTAL - dicasUsadas;
+
+  // Revela a letra de UMA célula específica
+  const revelarCelula = useCallback((row, col) => {
+    if (!gridData) return;
+    const cell = gridData.grid[row][col];
+    if (!cell || cell.isBlack) return;
+    const chave = `${row},${col}`;
+    if (celulasReveladas.has(chave)) return; // já revelada
+
+    // Preenche a letra correta
+    atualizarLetra(row, col, cell.letter);
+
+    // Marca a célula como revelada
+    setCelulasReveladas(prev => new Set([...prev, chave]));
+  }, [gridData, celulasReveladas, atualizarLetra]);
+
+  // Dica de LETRA — custa CUSTO_REVELAR_LETRA (1) dica
+  const handleRevealLetra = useCallback(() => {
+    if (!activeCell) {
+      Alert.alert('Selecione uma célula', 'Toque em uma célula antes de usar a dica.');
+      return;
+    }
+    if (dicasRestantes < CUSTO_REVELAR_LETRA) {
+      Alert.alert('Sem dicas', 'Você já usou todas as suas dicas nesta partida.');
+      return;
+    }
+    const { row, col } = activeCell;
+    const chave = `${row},${col}`;
+    if (celulasReveladas.has(chave)) {
+      Alert.alert('Já revelada', 'Esta célula já foi revelada por uma dica anterior.');
+      return;
+    }
+
+    Alert.alert(
+      '💡 Revelar letra',
+      `Custa 1 dica (${dicasRestantes} restante${dicasRestantes !== 1 ? 's' : ''}). Confirma?`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Revelar',
+          onPress: () => {
+            revelarCelula(row, col);
+            const novoTotal = dicasUsadas + CUSTO_REVELAR_LETRA;
+            setDicasUsadas(novoTotal);
+            salvarDicas(tema, tamanho, novoTotal);
+            const proxima = proximaCelula(row, col);
+            if (proxima) setActiveCell(proxima);
+          },
+        },
+      ]
+    );
+  }, [activeCell, dicasRestantes, dicasUsadas, celulasReveladas,
+      revelarCelula, proximaCelula, tema, tamanho]);
+
+  // Dica de PALAVRA — custa TODAS as 3 dicas + limitada a 1 vez por dia
+  //
+  // REGRAS:
+  //   1. O jogador precisa ter as 3 dicas intactas (dicasUsadas === 0)
+  //   2. Só pode revelar 1 palavra por dia em qualquer jogo
+  //   3. Ao confirmar, dicasUsadas vai para DICAS_TOTAL (esgota tudo)
+  //   4. A data de hoje é gravada no AsyncStorage — reseta à meia-noite
+  const handleRevealPalavra = useCallback(() => {
+    if (!highlightedWordId || !gridData) {
+      Alert.alert('Selecione uma palavra', 'Toque em uma célula para selecionar a palavra primeiro.');
+      return;
+    }
+
+    // Regra 1: precisa ter as 3 dicas disponíveis
+    if (dicasUsadas > 0) {
+      const faltam = CUSTO_REVELAR_PALAVRA - dicasUsadas;
+      Alert.alert(
+        '⛔ Dicas insuficientes',
+        `Revelar uma palavra inteira custa as ${CUSTO_REVELAR_PALAVRA} dicas de uma vez.
+
+Você já usou ${dicasUsadas} dica${dicasUsadas !== 1 ? 's' : ''} — só é possível revelar palavras quando todas as ${DICAS_TOTAL} estiverem disponíveis.`,
+        [{ text: 'Entendi' }]
+      );
+      return;
+    }
+
+    // Descobre quais células da palavra ainda não foram reveladas
+    const todasClues = [...gridData.clues.across, ...gridData.clues.down];
+    const clueAtiva = todasClues.find(c => c.id === highlightedWordId);
+    if (!clueAtiva) return;
+
+    const celulasNaoReveladas = [];
+    for (let i = 0; i < clueAtiva.length; i++) {
+      const r = clueAtiva.direction === 'across' ? clueAtiva.row : clueAtiva.row + i;
+      const c = clueAtiva.direction === 'across' ? clueAtiva.col + i : clueAtiva.col;
+      const chave = `${r},${c}`;
+      if (!celulasReveladas.has(chave)) celulasNaoReveladas.push({ r, c });
+    }
+
+    if (celulasNaoReveladas.length === 0) {
+      Alert.alert('Palavra já completa', 'Todas as letras desta palavra já foram reveladas.');
+      return;
+    }
+
+    // Regra 2: limite de 1 palavra revelada por dia — verificação assíncrona
+    jogadorJaRevelandoPalavraDia().then(jaUsou => {
+      if (jaUsou) {
+        Alert.alert(
+          '📅 Limite diário atingido',
+          'Você já revelou uma palavra inteira hoje.\n\nVolte amanhã para usar esta dica novamente!',
+          [{ text: 'Ok' }]
+        );
+        return;
+      }
+
+      // Tudo certo — confirma com o jogador
+      Alert.alert(
+        '⚠️ Revelar palavra inteira',
+        `Esta ação usa as ${CUSTO_REVELAR_PALAVRA} dicas de uma vez e só pode ser feita 1 vez por dia.
+
+Deseja revelar a palavra "${clueAtiva.number}" (${clueAtiva.length} letras)?`,
+        [
+          { text: 'Cancelar', style: 'cancel' },
+          {
+            text: `Revelar palavra (${clueAtiva.length} letras)`,
+            style: 'destructive',
+            onPress: () => {
+              // Revela todas as células da palavra
+              celulasNaoReveladas.forEach(({ r, c }) => revelarCelula(r, c));
+              // Esgota todas as dicas
+              setDicasUsadas(DICAS_TOTAL);
+              salvarDicas(tema, tamanho, DICAS_TOTAL);
+              // Marca o dia no AsyncStorage
+              marcarPalavraReveladaHoje();
+            },
+          },
+        ]
+      );
+    });
+  }, [highlightedWordId, gridData, dicasUsadas, celulasReveladas,
+      revelarCelula, tema, tamanho]);
+
   if (gerando || !gridData) {
     return (
       <SafeAreaView style={styles.safeArea}>
@@ -287,11 +514,67 @@ export default function GameScreen({ config, onGoHome }) {
           <TouchableOpacity onPress={onGoHome} style={styles.topBtn}>
             <Text style={styles.topBtnTextRed}>← Voltar</Text>
           </TouchableOpacity>
-          <Text style={styles.topTitle}>{tema.toUpperCase()}</Text>
-          <TouchableOpacity onPress={handleReset} style={styles.topBtn}>
-            <Text style={styles.topBtnTextGray}>↺</Text>
-          </TouchableOpacity>
+          <View style={styles.topCenter}>
+            <Text style={styles.topTitle}>{tema.toUpperCase()}</Text>
+            <View style={[styles.topDifBadge, { backgroundColor: difConfig.cor }]}>
+              <Text style={styles.topDifText}>{difConfig.emoji} {difConfig.label}</Text>
+            </View>
+          </View>
+          <View style={styles.topRight}>
+            <TouchableOpacity onPress={handleReset} style={styles.topBtn}>
+              <Text style={styles.topBtnTextGray}>↺</Text>
+            </TouchableOpacity>
+          </View>
         </View>
+
+        {/* ── BARRA DE DICAS — oculta em modo difícil (sem dicas) ── */}
+        {DICAS_TOTAL > 0 && <View style={styles.hintsBar}>
+          <View style={styles.hintsLeft}>
+            <Text style={styles.hintsLabel}>💡</Text>
+            {/* Bolinhas: dourada = disponível, cinza = usada */}
+            <View style={styles.hintsDots}>
+              {Array.from({ length: DICAS_TOTAL }).map((_, i) => (
+                <View
+                  key={i}
+                  style={[styles.hintDot, i < dicasRestantes ? styles.hintDotAvail : styles.hintDotUsed]}
+                />
+              ))}
+            </View>
+            <Text style={styles.hintsCount}>{dicasRestantes}/{DICAS_TOTAL}</Text>
+          </View>
+
+          <View style={styles.hintsButtons}>
+            {/* Botão LETRA: ativo se tiver pelo menos 1 dica */}
+            <TouchableOpacity
+              style={[styles.hintBtn, dicasRestantes < CUSTO_REVELAR_LETRA && styles.hintBtnDisabled]}
+              onPress={handleRevealLetra}
+              disabled={dicasRestantes < CUSTO_REVELAR_LETRA}
+              activeOpacity={0.75}
+            >
+              <Text style={[styles.hintBtnText, dicasRestantes < CUSTO_REVELAR_LETRA && styles.hintBtnTextDisabled]}>
+                Letra  <Text style={styles.hintBtnCost}>-1</Text>
+              </Text>
+            </TouchableOpacity>
+
+            {/* Botão PALAVRA: só ativo se tiver as 3 dicas (dicasUsadas === 0) */}
+            <TouchableOpacity
+              style={[
+                styles.hintBtn, styles.hintBtnWord,
+                dicasUsadas > 0 && styles.hintBtnDisabled,
+              ]}
+              onPress={handleRevealPalavra}
+              disabled={dicasUsadas > 0}
+              activeOpacity={0.75}
+            >
+              <Text style={[
+                styles.hintBtnText, styles.hintBtnWordText,
+                dicasUsadas > 0 && styles.hintBtnTextDisabled,
+              ]}>
+                Palavra  <Text style={styles.hintBtnCostWord}>-{DICAS_TOTAL}⚠</Text>
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>}
 
         <View style={styles.cluePanel}>
           {activeClue ? (
@@ -318,6 +601,7 @@ export default function GameScreen({ config, onGoHome }) {
               highlightedWordId={highlightedWordId}
               currentDirection={currentDirection}
               verificationResult={verificationResult}
+              celulasReveladas={celulasReveladas}
               onCellPress={handleCellPress}
               onKeyPress={handleKeyPress}
             />
@@ -399,6 +683,76 @@ const styles = StyleSheet.create({
   },
   clueItemActive: { 
     color: '#e94560', fontWeight: '700' 
+  },
+
+  // ── TopBar ──
+  topRight:    { flexDirection: 'row', alignItems: 'center' },
+  topCenter:   { alignItems: 'center', flex: 1 },
+  topDifBadge: {
+    paddingHorizontal: 8, paddingVertical: 2,
+    borderRadius: 8, marginTop: 3,
+  },
+  topDifText: { color: '#fff', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
+
+  // ── Barra de dicas ──
+  hintsBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: '#111827',
+    borderBottomWidth: 1,
+    borderBottomColor: '#0f3460',
+  },
+  hintsLeft: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  hintsLabel: { color: '#f5c518', fontSize: 13, fontWeight: '700' },
+  hintsDots:  { flexDirection: 'row', gap: 5 },
+  hintDot: {
+    width: 9, height: 9, borderRadius: 5,
+  },
+  hintDotAvail: { backgroundColor: '#f5c518' },
+  hintDotUsed:  { backgroundColor: '#333350', borderWidth: 1, borderColor: '#444466' },
+  hintsCount: { color: '#a0a0b0', fontSize: 12, fontWeight: '600' },
+
+  hintsButtons: { flexDirection: 'row', gap: 8 },
+  hintBtn: {
+    paddingVertical: 6, paddingHorizontal: 14,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#f5c518',
+    backgroundColor: 'transparent',
+  },
+  hintBtnWord: {
+    backgroundColor: '#f5c518',
+  },
+  hintBtnDisabled: {
+    borderColor: '#333350',
+    backgroundColor: 'transparent',
+    opacity: 0.4,
+  },
+  hintBtnText: {
+    color: '#f5c518',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  hintBtnWordText: {
+    color: '#111827',
+  },
+  hintBtnTextDisabled: {
+    color: '#555570',
+  },
+  hintBtnCost: {
+    // Indicador de custo no botão Letra ("-1")
+    fontSize: 10,
+    color: '#b89000',
+    fontWeight: '700',
+  },
+  hintBtnCostWord: {
+    // Indicador de custo no botão Palavra ("-3⚠")
+    fontSize: 10,
+    color: '#111827',
+    fontWeight: '700',
   },
 
   bottomBar: {

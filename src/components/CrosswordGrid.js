@@ -43,6 +43,7 @@ export default function CrosswordGrid({
   highlightedWordId,
   currentDirection,
   verificationResult,
+  celulasReveladas = new Set(),  // Set<"row,col"> de células reveladas pela dica
   onCellPress,
   onKeyPress,
 }) {
@@ -70,14 +71,22 @@ export default function CrosswordGrid({
   const handleKeyPress = useCallback((e) => {
     if (!activeCell) return;
     const key = e.nativeEvent.key;
+    const chave = `${activeCell.row},${activeCell.col}`;
+
+    // Células reveladas são somente leitura: ignora qualquer digitação.
+    // O Backspace também é bloqueado — não faz sentido apagar uma dica.
+    if (celulasReveladas.has(chave)) {
+      // Permite apenas navegar (teclas de direção não chegam aqui, mas
+      // se o usuário tentar digitar, avança para a próxima célula normal)
+      return;
+    }
 
     if (key === 'Backspace') {
       onKeyPress(activeCell.row, activeCell.col, 'BACKSPACE');
     } else if (/^[a-zA-Z]$/.test(key)) {
       onKeyPress(activeCell.row, activeCell.col, key.toUpperCase());
     }
-    // Ignora números, símbolos, Enter, etc.
-  }, [activeCell, onKeyPress]);
+  }, [activeCell, onKeyPress, celulasReveladas]);
 
   // Restaura o sentinela após qualquer digitação (para o próximo Backspace detectar)
   const handleChangeText = useCallback(() => {
@@ -98,25 +107,32 @@ export default function CrosswordGrid({
     const result      = verificationResult?.[row]?.[col];
     const isFocused   = activeCell?.row === row && activeCell?.col === col;
     const isHighlight = cell.wordIds.includes(highlightedWordId);
+    const isRevealed  = celulasReveladas.has(`${row},${col}`);
 
+    // Hierarquia de prioridade (do mais alto ao mais baixo):
+    // verificação > revelada > cursor > destaque de palavra
     if (result === 'correct')   return styles.cellCorrect;
     if (result === 'incorrect') return styles.cellIncorrect;
-    if (isFocused)              return styles.cellFocused;    // cursor preciso
-    if (isHighlight)            return styles.cellHighlighted; // palavra inteira
+    if (isRevealed && isFocused) return styles.cellRevealedFocused;
+    if (isRevealed)             return styles.cellRevealed;  // dourado
+    if (isFocused)              return styles.cellFocused;
+    if (isHighlight)            return styles.cellHighlighted;
     return null;
   };
 
   // Cor do número da pista (garante contraste em todos os estados)
-  const getClueNumColor = (result, isFocused, isHighlight) => {
+  const getClueNumColor = (result, isFocused, isHighlight, isRevealed) => {
     if (result === 'correct' || result === 'incorrect') return '#ffffff';
-    if (isFocused)   return '#003060'; // azul escuro sobre azul forte
+    if (isRevealed) return '#7a5500';   // marrom escuro sobre dourado
+    if (isFocused)  return '#003060';
     if (isHighlight) return '#1a3a5a';
     return '#444455';
   };
 
   // Cor da letra digitada
-  const getLetterColor = (result, isFocused) => {
+  const getLetterColor = (result, isFocused, isRevealed) => {
     if (result === 'correct' || result === 'incorrect') return '#ffffff';
+    if (isRevealed) return '#5a3e00';   // texto âmbar escuro sobre fundo dourado
     if (isFocused) return '#003060';
     return '#1a1a2e';
   };
@@ -150,10 +166,11 @@ export default function CrosswordGrid({
             <View key={`row-${rowIndex}`} style={styles.gridRow}>
               {row.map((cell, colIndex) => {
                 const cellKey   = `${rowIndex}-${colIndex}`;
-                const result    = verificationResult?.[rowIndex]?.[colIndex];
-                const isFocused = activeCell?.row === rowIndex && activeCell?.col === colIndex;
-                const isHL      = cell.wordIds.includes(highlightedWordId);
-                const dynStyle  = getCellStyle(rowIndex, colIndex, cell);
+                const result     = verificationResult?.[rowIndex]?.[colIndex];
+                const isFocused  = activeCell?.row === rowIndex && activeCell?.col === colIndex;
+                const isHL       = cell.wordIds.includes(highlightedWordId);
+                const isRevealed = celulasReveladas.has(`${rowIndex},${colIndex}`);
+                const dynStyle   = getCellStyle(rowIndex, colIndex, cell);
 
                 if (cell.isBlack) {
                   return (
@@ -165,8 +182,8 @@ export default function CrosswordGrid({
                   );
                 }
 
-                const numColor    = getClueNumColor(result, isFocused, isHL);
-                const letterColor = getLetterColor(result, isFocused);
+                const numColor    = getClueNumColor(result, isFocused, isHL, isRevealed);
+                const letterColor = getLetterColor(result, isFocused, isRevealed);
                 const letra       = userAnswers[rowIndex]?.[colIndex] ?? '';
 
                 return (
@@ -198,8 +215,13 @@ export default function CrosswordGrid({
                     </Text>
 
                     {/* Cursor piscante: pequeno sublinhado na célula ativa */}
-                    {isFocused && !letra && (
+                    {isFocused && !letra && !isRevealed && (
                       <View style={[styles.cursor, { width: CELL_SIZE * 0.4 }]} />
+                    )}
+                    {isRevealed && (
+                      <Text style={[styles.revealIcon, { fontSize: CELL_SIZE * 0.2 }]}>
+                        💡
+                      </Text>
                     )}
                   </TouchableOpacity>
                 );
@@ -274,5 +296,25 @@ const styles = StyleSheet.create({
     backgroundColor: '#ffffff',
     borderRadius: 1,
     opacity: 0.9,
+  },
+
+  // ── Células reveladas pela dica ──
+  // Visual dourado/âmbar para distinguir claramente do esforço próprio do jogador.
+  // Contraste AAA: fundo #f5c518 + texto #5a3e00 → ratio > 7:1.
+  cellRevealed: {
+    backgroundColor: '#f5c518',
+    borderColor: '#c49a00',
+    borderWidth: 1,
+  },
+  cellRevealedFocused: {
+    backgroundColor: '#f5c518',
+    borderColor: '#c49a00',
+    borderWidth: 2.5,
+  },
+  revealIcon: {
+    position: 'absolute',
+    bottom: 1,
+    right: 1,
+    lineHeight: 14,
   },
 });
