@@ -21,7 +21,7 @@ const TEMAS = [
 ];
 const TAMANHOS = ['8x8', '10x10', '12x12'];
 
-export default function HomeScreen({ onStartGame }) {
+export default function HomeScreen({ onStartGame, onGoHistory }) {
   // Estado local para as seleções do usuário
   const [temaSelecionado, setTemaSelecionado] = useState(TEMAS[0].valor);
   const [tamanhoSelecionado, setTamanhoSelecionado] = useState('10x10');
@@ -118,6 +118,15 @@ export default function HomeScreen({ onStartGame }) {
           activeOpacity={0.85}
         >
           <Text style={styles.startButtonText}>🔤 GERAR CRUZADA</Text>
+        </TouchableOpacity>
+
+        {/* ── BOTÃO HISTÓRICO ── */}
+        <TouchableOpacity
+          style={styles.historyButton}
+          onPress={onGoHistory}
+          activeOpacity={0.85}
+        >
+          <Text style={styles.historyButtonText}>🕒 VER HISTÓRICO</Text>
         </TouchableOpacity>
 
       </ScrollView>
@@ -222,7 +231,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 
-  // ── Botão iniciar ──
+  // ── Botões ──
   startButton: {
     backgroundColor: '#e94560',
     borderRadius: 14,
@@ -239,5 +248,20 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '900',
     letterSpacing: 2,
+  },
+  historyButton: {
+    backgroundColor: '#0f3460',
+    borderRadius: 14,
+    paddingVertical: 18,
+    alignItems: 'center',
+    marginTop: 12, 
+    borderWidth: 1,
+    borderColor: '#164a80',
+  },
+  historyButtonText: {
+    color: '#4fc3f7',
+    fontSize: 16,
+    fontWeight: '800',
+    letterSpacing: 1.5,
   },
 });
